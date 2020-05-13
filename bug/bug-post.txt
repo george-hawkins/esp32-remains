@@ -1,0 +1,161 @@
+Subject: WLAN.status() always reports STAT_CONNECTING but expect STAT_WRONG_PASSWORD
+
+I thought I would be able to use [url=https://docs.micropython.org/en/latest/library/network.WLAN.html#network.WLAN.status]WLAN.status()[/url] to detect if the wrong password was specified when connecting to a given SSID.
+
+However, it just continuously reports STAT_CONNECTING and it's only in the log output that I see that something is wrong - I continuously see:
+
+[code]
+I (101375) wifi: STA_DISCONNECTED, reason:15
+I (103435) wifi: STA_DISCONNECTED, reason:205
+[/code]
+
+If you call WLAN.connect(ssid, password) it tries repeatedly to connect, is there no way to detect that the connections are failing because the password is incorrect, i.e. how would I ever see STAT_WRONG_PASSWORD?
+
+The following example demonstrates the issue:
+
+[code]
+import network
+
+ssid = "George Hawkins AC"
+password = "My incorrect password"
+
+sta = network.WLAN(network.STA_IF)
+sta.active(True)
+sta.connect(ssid, password)
+
+status = -1
+while not sta.isconnected():
+    new_status = sta.status()
+    if new_status != status:
+        status = new_status
+        print('Status', status)
+
+print("Connected to {} with address {}".format(ssid, sta.ifconfig()[0]))
+[/code]
+
+Just replace the SSID with the name of your WiFi network (and deliberately leave password with an incorrect value) and run the program. You'll see that status never changes from STAT_CONNECTING.
+
+Here's the complete output from my REPL session:
+
+[code]
+>>>
+paste mode; Ctrl-C to cancel, Ctrl-D to finish
+=== import network
+=== 
+=== ssid = "George Hawkins AC"
+=== password = "My incorrect password"
+=== 
+=== sta = network.WLAN(network.STA_IF)
+=== sta.active(True)
+=== sta.connect(ssid, password)
+=== 
+=== status = -1
+=== while not sta.isconnected():
+===     new_status = sta.status()
+===     if new_status != status:
+===         status = new_status
+===         print('Status', status)
+=== 
+=== print("Connected to {} with address {}".format(ssid, sta.ifconfig()[0]))
+I (68420) wifi: wifi driver task: 3ffd2bcc, prio:23, stack:3584, core=0
+I (83795) system_api: Base MAC address is not set, read default base MAC address from BLK0 of EFUSE
+I (83805) system_api: Base MAC address is not set, read default base MAC address from BLK0 of EFUSE
+I (83825) wifi: wifi firmware version: 10f4364
+I (83825) wifi: config NVS flash: enabled
+I (83825) wifi: config nano formating: disabled
+I (83835) wifi: Init dynamic tx buffer num: 32
+I (83835) wifi: Init data frame dynamic rx buffer num: 32
+I (83845) wifi: Init management frame dynamic rx buffer num: 32
+I (83845) wifi: Init management short buffer num: 32
+I (83855) wifi: Init static rx buffer size: 1600
+I (83855) wifi: Init static rx buffer num: 10
+I (83855) wifi: Init dynamic rx buffer num: 32
+I (83955) phy: phy_version: 4102, 2fa7a43, Jul 15 2019, 13:06:06, 0, 0
+I (83955) wifi: mode : sta (a4:cf:12:62:12:24)
+True
+I (83955) wifi: STA_START
+Status 1001
+I (84085) wifi: new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1
+I (84925) wifi: state: init -> auth (b0)
+I (84935) wifi: state: auth -> assoc (0)
+I (84945) wifi: state: assoc -> run (10)
+I (88955) wifi: state: run -> init (2c0)
+I (88955) wifi: new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1
+I (88955) wifi: new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1
+I (88955) wifi: STA_DISCONNECTED, reason:15
+I (91015) wifi: STA_DISCONNECTED, reason:205
+I (91135) wifi: new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1
+I (91135) wifi: state: init -> auth (b0)
+I (91145) wifi: state: auth -> assoc (0)
+I (91155) wifi: state: assoc -> run (10)
+I (95155) wifi: state: run -> init (2c0)
+I (95155) wifi: new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1
+I (95155) wifi: new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1
+I (95165) wifi: STA_DISCONNECTED, reason:15
+I (97225) wifi: STA_DISCONNECTED, reason:205
+...
+[/code]
+
+I'm using MicroPython 1.12 with an Adafruit HUZZAH32 board.
+
+---
+
+Thanks for your reply tve - I tried various iterations of your idea but still didn't get very informative statuses.
+
+I wrote my own status function like so:
+
+[code]
+def status(wlan, timeout_ms):
+    start = time.ticks_ms()
+    while True:
+        s = wlan.status()
+        if s != network.STAT_CONNECTING:
+            return s
+        if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
+            wlan.disconnect()
+            return wlan.status()
+[/code]
+
+And then used it like so:
+
+[code]
+sta.connect("Valid SSID", "invalid password")
+print(status(sta, 8000))
+[/code]
+
+I consistently just got back 205, i.e. CONNECTION_FAIL, rather than something indicating a password problem. I don't know if the issue lies with my AP, the ESP-IDF logic or the internal MicroPython logic.
+
+Note: the full set of codes, including CONNECTION_FAIL, can be found in [url=https://github.com/espressif/esp-idf/blob/master/components/esp_wifi/include/esp_wifi_types.h]esp-idf/.../esp_wifi_types.h[/url] (just search for "WIFI_REASON").
+
+I see that MicroPython 1.12 is using esp_event_loop_init and its associated functions and that these belong to what Espressif now describe as their [url=https://docs.espressif.com/projects/esp-idf/en/latest/api-reference/system/esp_event_legacy.html]legacy event loop API[/url].
+
+I also tried a fancier approach, where I started with a very low timeout and gradually increased it:
+
+[code]
+def join(*args, **kwargs):
+    timeout=kwargs.pop("timeout", 100)
+    while True:
+        sta.connect(*args, **kwargs)
+        print("Waitng {}ms".format(timeout))
+        time.sleep_ms(timeout)
+        if sta.isconnected():
+            return
+        sta.disconnect()
+        s = sta.status()
+        print("Status", s)
+        timeout = timeout * 2
+        if timeout > MAX_TIMEOUT:
+            return
+[/code]
+
+Here the join function also does the connect and you use it like so:
+
+[code]
+sta = network.WLAN(network.STA_IF)
+sta.active(True)
+join("Valid SSID", "invalid password")
+[/code]
+
+However, this produced even odder results. Even when using a correct password, I'd sometimes see quite unexpected intermediate statuses, e.g. AUTH_FAIL, before the timeout got long enough and it had enough time to successfully establish a connection. But with both good and bad passwords I [i]generally[/i] saw ASSOC_LEAVE as the intermediate status code and with bad passwords, I never consistently saw statuses that indicated that it was a bad password that was the problem.
+
+Oh dear - it looks like I'll just have to report some nebulous catch-all error message to the end-user ;(
